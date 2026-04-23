@@ -418,3 +418,73 @@ contract HotelierAIV is ReentrancyGuard, Pausable {
         address old = owner;
         owner = newOwner;
         emit StewardSet(old, newOwner, block.timestamp);
+    }
+
+    function setProtocolFeeBps(uint256 newBps) external onlyOwner {
+        if (newBps > MAX_FEE_BPS_CAP) revert HAV_FeeTooHigh();
+        uint256 old = protocolFeeBps;
+        protocolFeeBps = newBps;
+        emit ProtocolFeeChanged(old, newBps, block.timestamp);
+    }
+
+    function setTokenEnabled(address token, bool enabled) external onlyOwner {
+        if (token == address(0)) revert HAV_BadConfig();
+        tokenEnabled[token] = enabled;
+        emit TokenEnablement(token, enabled, block.timestamp);
+    }
+
+    function refreshTokenInfo(address token) external whenNotPaused returns (TokenInfo memory ti) {
+        if (token == address(0)) revert HAV_BadConfig();
+        // best-effort: not all tokens implement metadata
+        uint8 dec = 18;
+        bytes32 sym;
+        bytes32 nam;
+        bool ok;
+        try IERC20Metadata(token).decimals() returns (uint8 d) {
+            dec = d;
+            ok = true;
+        } catch {}
+        try IERC20Metadata(token).symbol() returns (string memory s) {
+            sym = keccak256(bytes(s));
+            ok = true;
+        } catch {}
+        try IERC20Metadata(token).name() returns (string memory n) {
+            nam = keccak256(bytes(n));
+            ok = true;
+        } catch {}
+        ti = TokenInfo({decimals: dec, sym: sym, nam: nam, updatedAt: uint48(block.timestamp), ok: ok});
+        tokenInfo[token] = ti;
+    }
+
+    function setRouteProfile(
+        bytes32 routeTag,
+        uint64 dstChainId,
+        bool enabled,
+        uint16 riskTier,
+        uint32 latencyHintSec,
+        address curator
+    ) external onlyOwner {
+        if (routeTag == bytes32(0)) revert HAV_BadConfig();
+        if (dstChainId == 0) revert HAV_BadConfig();
+        if (curator == address(0)) revert HAV_BadConfig();
+        RouteProfile storage p = routeProfiles[routeTag];
+        p.routeTag = routeTag;
+        p.dstChainId = dstChainId;
+        p.riskTier = riskTier;
+        p.latencyHintSec = latencyHintSec;
+        p.updatedAt = uint48(block.timestamp);
+        p.curator = curator;
+        p.enabled = enabled;
+        emit RouteProfileSet(routeTag, dstChainId, enabled, riskTier, latencyHintSec, curator, block.timestamp);
+    }
+
+    function setRouteScore(bytes32 routeTag, uint256 newScoreBps) external onlyOwner {
+        if (routeTag == bytes32(0)) revert HAV_BadConfig();
+        if (newScoreBps > 10_000) revert HAV_BadConfig();
+        uint256 old = routeScoreBps[routeTag];
+        routeScoreBps[routeTag] = newScoreBps;
+        emit RouteScoreSet(routeTag, old, newScoreBps, block.timestamp);
+    }
+
+    function pause(bool p) external onlyGuardian {
+        _setPaused(p);
