@@ -488,3 +488,73 @@ contract HotelierAIV is ReentrancyGuard, Pausable {
 
     function pause(bool p) external onlyGuardian {
         _setPaused(p);
+    }
+
+    // ---- vault ----
+    function vaultBalance(address who, address token) external view returns (uint256) {
+        return _vault[who][token];
+    }
+
+    function deposit(address token, uint256 amount) external nonReentrant whenNotPaused {
+        if (!tokenEnabled[token]) revert HAV_DisabledToken();
+        if (amount <= DUST_GUARD) revert HAV_AmountTooSmall();
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        uint256 nb = _vault[msg.sender][token] + amount;
+        _vault[msg.sender][token] = nb;
+        emit VaultCredit(msg.sender, token, amount, nb, block.timestamp);
+    }
+
+    function depositWithPermit(
+        address token,
+        uint256 amount,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external nonReentrant whenNotPaused {
+        if (!tokenEnabled[token]) revert HAV_DisabledToken();
+        if (amount <= DUST_GUARD) revert HAV_AmountTooSmall();
+        try IERC20Permit(token).permit(msg.sender, address(this), amount, deadline, v, r, s) {
+            emit VaultPermitUsed(msg.sender, token, amount, deadline, block.timestamp);
+        } catch {
+            revert HAV_PermitFailed();
+        }
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        uint256 nb = _vault[msg.sender][token] + amount;
+        _vault[msg.sender][token] = nb;
+        emit VaultCredit(msg.sender, token, amount, nb, block.timestamp);
+    }
+
+    function batchDeposit(address[] calldata tokens, uint256[] calldata amounts) external nonReentrant whenNotPaused {
+        uint256 n = tokens.length;
+        if (n == 0 || n != amounts.length) revert HAV_BadConfig();
+        for (uint256 i = 0; i < n; i++) {
+            address t = tokens[i];
+            uint256 a = amounts[i];
+            if (!tokenEnabled[t]) revert HAV_DisabledToken();
+            if (a <= DUST_GUARD) revert HAV_AmountTooSmall();
+            IERC20(t).safeTransferFrom(msg.sender, address(this), a);
+            uint256 nb = _vault[msg.sender][t] + a;
+            _vault[msg.sender][t] = nb;
+            emit VaultCredit(msg.sender, t, a, nb, block.timestamp);
+        }
+    }
+
+    function batchWithdraw(address[] calldata tokens, uint256[] calldata amounts, address to) external nonReentrant whenNotPaused {
+        uint256 n = tokens.length;
+        if (to == address(0)) revert HAV_BadConfig();
+        if (n == 0 || n != amounts.length) revert HAV_BadConfig();
+        for (uint256 i = 0; i < n; i++) {
+            address t = tokens[i];
+            uint256 a = amounts[i];
+            uint256 bal = _vault[msg.sender][t];
+            if (a == 0 || a > bal) revert HAV_BalanceLow();
+            unchecked {
+                _vault[msg.sender][t] = bal - a;
+            }
+            IERC20(t).safeTransfer(to, a);
+            emit VaultDebit(msg.sender, t, a, _vault[msg.sender][t], block.timestamp);
+        }
+    }
+
+    function withdraw(address token, uint256 amount, address to) external nonReentrant whenNotPaused {
