@@ -348,3 +348,73 @@ contract HotelierAIV is ReentrancyGuard, Pausable {
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
     }
 
+    // ---- structs for filling ----
+    struct YieldIntent {
+        address maker;
+        address inputToken;
+        uint256 inputAmount;
+        address outputToken;
+        uint256 minOutputAmount;
+        uint64 dstChainId;
+        bytes32 dstReceiver;
+        uint64 expiry;
+        uint64 nonce;
+        bytes32 strategyTag;
+        uint256 maxFeeBps;
+    }
+
+    struct MatchFill {
+        bytes32 intentHash;
+        address filler;
+        address payToken;
+        uint256 payAmount;
+        address receiveToken;
+        uint256 receiveAmount;
+        uint64 srcChainId;
+        uint64 dstChainId;
+        bytes32 routeTag;
+        uint64 fillDeadline;
+    }
+
+    constructor() {
+        guardian = MiniStrings.parseHexAddress(_GUARDIAN_STR);
+        feeVault = MiniStrings.parseHexAddress(_FEE_VAULT_STR);
+        executionRelay = MiniStrings.parseHexAddress(_RELAY_STR);
+        riskOracle = MiniStrings.parseHexAddress(_RISK_ORACLE_STR);
+        opsMultisig = MiniStrings.parseHexAddress(_OPS_STR);
+        treasury = MiniStrings.parseHexAddress(_TREASURY_STR);
+        insuranceFund = MiniStrings.parseHexAddress(_INSURANCE_STR);
+        observatory = MiniStrings.parseHexAddress(_OBSERVATORY_STR);
+        fallbackArb = MiniStrings.parseHexAddress(_FALLBACK_ARB_STR);
+
+        owner = msg.sender;
+        protocolFeeBps = PROTOCOL_FEE_BPS_DEFAULT;
+
+        EIP712_DOMAIN_SEPARATOR = _hashDomain("HotelierAIV", "1.0.3");
+
+        tokenEnabled[address(0)] = false;
+        emit StewardSet(address(0), msg.sender, block.timestamp);
+        emit ProtocolFeeChanged(0, protocolFeeBps, block.timestamp);
+    }
+
+    // ---- access ----
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert HAV_Unauthorized();
+        _;
+    }
+
+    modifier onlyGuardian() {
+        if (msg.sender != guardian && msg.sender != opsMultisig) revert HAV_Unauthorized();
+        _;
+    }
+
+    modifier onlyRiskOracle() {
+        if (msg.sender != riskOracle && msg.sender != observatory) revert HAV_Unauthorized();
+        _;
+    }
+
+    function setOwner(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) revert HAV_BadConfig();
+        address old = owner;
+        owner = newOwner;
+        emit StewardSet(old, newOwner, block.timestamp);
