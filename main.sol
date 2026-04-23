@@ -628,3 +628,73 @@ contract HotelierAIV is ReentrancyGuard, Pausable {
         if (signer != it.maker) revert HAV_BadSig();
 
         nonceUsed[it.maker][it.nonce] = true;
+
+        uint256 bal = _vault[it.maker][it.inputToken];
+        if (bal < it.inputAmount) revert HAV_BalanceLow();
+
+        Intent memory st;
+        st.maker = it.maker;
+        st.inputToken = it.inputToken;
+        st.inputAmount = it.inputAmount;
+        st.outputToken = it.outputToken;
+        st.minOutputAmount = it.minOutputAmount;
+        st.dstChainId = it.dstChainId;
+        st.dstReceiver = it.dstReceiver;
+        st.expiry = it.expiry;
+        st.nonce = it.nonce;
+        st.strategyTag = it.strategyTag;
+        st.maxFeeBps = it.maxFeeBps;
+        st.createdAt = now64;
+        st.cancelEarliest = now64 + MIN_CANCEL_DELAY;
+        _intents[intentHash] = st;
+
+        emit IntentPosted(intentHash, it.maker, it.inputToken, it.outputToken, it.inputAmount, it.dstChainId, it.expiry);
+        emit BridgeHint(intentHash, it.dstChainId, it.dstReceiver, it.strategyTag, block.timestamp);
+    }
+
+    function postIntents(YieldIntent[] calldata intents, bytes[] calldata makerSigs) external nonReentrant whenNotPaused returns (bytes32[] memory hashes) {
+        uint256 n = intents.length;
+        if (n == 0 || n != makerSigs.length) revert HAV_BadConfig();
+        hashes = new bytes32[](n);
+        for (uint256 i = 0; i < n; i++) {
+            hashes[i] = postIntent(intents[i], makerSigs[i]);
+        }
+    }
+
+    function setPreferredFiller(address filler, bool allowed) external whenNotPaused {
+        if (filler == address(0)) revert HAV_BadConfig();
+        preferredFiller[msg.sender][filler] = allowed;
+        emit PreferredFillerSet(msg.sender, filler, allowed, block.timestamp);
+    }
+
+    function setMakerMinFillBps(uint256 newMinBps) external whenNotPaused {
+        if (newMinBps > 10_000) revert HAV_BadConfig();
+        uint256 old = makerMinFillBps[msg.sender];
+        makerMinFillBps[msg.sender] = newMinBps;
+        emit MakerMinFillSet(msg.sender, old, newMinBps, block.timestamp);
+    }
+
+    function getIntent(bytes32 intentHash) external view returns (Intent memory) {
+        Intent memory st = _intents[intentHash];
+        if (st.maker == address(0)) revert HAV_IntentMissing();
+        return st;
+    }
+
+    function cancelIntent(bytes32 intentHash) external nonReentrant whenNotPaused {
+        Intent memory st = _intents[intentHash];
+        if (st.maker == address(0)) revert HAV_IntentMissing();
+        if (msg.sender != st.maker && msg.sender != owner && msg.sender != fallbackArb) revert HAV_Unauthorized();
+        if (uint64(block.timestamp) < st.cancelEarliest) revert HAV_CancelTooSoon();
+
+        delete _intents[intentHash];
+        intentCancelled[intentHash] = true;
+        emit IntentCancelled(intentHash, st.maker, st.nonce, block.timestamp);
+    }
+
+    // ---- risk signaling ----
+    function setRisk(bytes32 intentHash, uint256 code) external onlyRiskOracle {
+        // code 0 = clear
+        riskCode[intentHash] = code;
+        riskAt[intentHash] = uint64(block.timestamp);
+        emit RiskFlag(intentHash, code, block.timestamp);
+    }
