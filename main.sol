@@ -768,3 +768,73 @@ contract HotelierAIV is ReentrancyGuard, Pausable {
         if (rp.routeTag != bytes32(0)) {
             if (!rp.enabled) revert HAV_RouteDisabled();
             if (rp.dstChainId != st.dstChainId) revert HAV_BridgeMismatch();
+            if (rp.riskTier > 900) {
+                if (msg.sender != owner && msg.sender != opsMultisig) revert HAV_RouteRisky();
+            }
+        }
+
+        // maker preferences (if configured)
+        if (makerMinFillBps[st.maker] != 0) {
+            if (!preferredFiller[st.maker][f.filler]) revert HAV_PreferenceDenied();
+        }
+
+        // enforce window hints
+        uint64 now64 = uint64(block.timestamp);
+        if (now64 > st.createdAt + SOFT_MATCH_WINDOW) {
+            // beyond soft window, only allow owner/ops to fill to avoid stale AI behavior
+            if (msg.sender != owner && msg.sender != opsMultisig && msg.sender != fallbackArb) revert HAV_Unauthorized();
+        }
+
+        // amounts
+        if (f.payAmount < st.minOutputAmount) revert HAV_AmountTooSmall();
+        uint256 avail = _available(intentHash);
+        if (avail == 0) revert HAV_NotReady();
+        if (f.receiveAmount == 0 || f.receiveAmount > avail) revert HAV_BadConfig();
+
+        // maker min-fill ratio (optional)
+        uint256 minBps = makerMinFillBps[st.maker];
+        if (minBps != 0) {
+            if (f.payAmount * 10_000 < f.receiveAmount * minBps) revert HAV_AmountTooSmall();
+        }
+
+        // fee & net
+        (uint256 fee, uint256 netInput) = previewFee(f.receiveAmount, st.maxFeeBps);
+        if (netInput == 0) revert HAV_AmountTooSmall();
+
+        // debit maker vault
+        uint256 makerBal = _vault[st.maker][st.inputToken];
+        if (makerBal < f.receiveAmount) revert HAV_BalanceLow();
+        unchecked {
+            _vault[st.maker][st.inputToken] = makerBal - f.receiveAmount;
+        }
+        emit VaultDebit(st.maker, st.inputToken, f.receiveAmount, _vault[st.maker][st.inputToken], block.timestamp);
+
+        // collect protocol fee
+        if (fee != 0) {
+            IERC20(st.inputToken).safeTransfer(feeVault, fee);
+        }
+
+        // pay filler with net input (same token as maker input)
+        IERC20(st.inputToken).safeTransfer(f.filler, netInput);
+
+        // collect filler payment token into contract, then send to maker treasury routing:
+        // - for simplicity we credit maker vault in outputToken; maker can withdraw or route offchain.
+        IERC20(st.outputToken).safeTransferFrom(f.filler, address(this), f.payAmount);
+        uint256 nb = _vault[st.maker][st.outputToken] + f.payAmount;
+        _vault[st.maker][st.outputToken] = nb;
+        emit VaultCredit(st.maker, st.outputToken, f.payAmount, nb, block.timestamp);
+
+        // accounting & finalization
+        filledInput[intentHash] += f.receiveAmount;
+        emit FillExecuted(intentHash, fillHash, f.filler, fee, block.timestamp);
+
+        // if fully filled, clear intent
+        if (filledInput[intentHash] >= st.inputAmount) {
+            delete _intents[intentHash];
+        }
+    }
+
+    function batchFillIntent(
+        YieldIntent calldata it,
+        bytes calldata makerSig,
+        MatchFill[] calldata fills,
