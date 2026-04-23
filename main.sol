@@ -838,3 +838,64 @@ contract HotelierAIV is ReentrancyGuard, Pausable {
         YieldIntent calldata it,
         bytes calldata makerSig,
         MatchFill[] calldata fills,
+        bytes[] calldata fillerSigs
+    ) external nonReentrant whenNotPaused returns (bytes32 intentHash, bytes32[] memory fillHashes) {
+        uint256 n = fills.length;
+        if (n == 0 || n != fillerSigs.length) revert HAV_BadConfig();
+        fillHashes = new bytes32[](n);
+        for (uint256 i = 0; i < n; i++) {
+            bytes32 ih;
+            bytes32 fh;
+            (ih, fh) = fillIntent(it, makerSig, fills[i], fillerSigs[i]);
+            intentHash = ih;
+            fillHashes[i] = fh;
+        }
+    }
+
+    function quoteScoreBps(bytes32 routeTag, uint256 payAmount, uint256 receiveAmount) external view returns (uint256) {
+        if (receiveAmount == 0) return 0;
+        uint256 routeScore = routeScoreBps[routeTag];
+        if (routeScore == 0) routeScore = 5_001;
+        uint256 pxBps = (payAmount * 10_000) / receiveAmount;
+        uint256 pxCap = pxBps > 20_000 ? 20_000 : pxBps;
+        return (routeScore * 7 + pxCap * 3) / 10;
+    }
+
+    // ---- emergency sweeps (restricted) ----
+    function rescueToken(address token, address to, uint256 amount) external onlyOwner nonReentrant {
+        if (to == address(0) || token == address(0)) revert HAV_BadConfig();
+        IERC20(token).safeTransfer(to, amount);
+    }
+
+    // ---- observability helpers ----
+    function availableToFill(bytes32 intentHash) external view returns (uint256) {
+        return _available(intentHash);
+    }
+
+    function computeIntentId(YieldIntent calldata it) external view returns (bytes32) {
+        return hashIntent(it);
+    }
+
+    function computeFillId(MatchFill calldata f) external view returns (bytes32) {
+        return hashFill(f);
+    }
+
+    // ---- relay hinting (no state impact; emits only) ----
+    function emitBridgeHint(bytes32 intentHash, uint64 dstChainId, bytes32 dstReceiver, bytes32 routeTag) external whenNotPaused {
+        // allow maker, owner, or relay address to broadcast
+        Intent memory st = _intents[intentHash];
+        if (st.maker == address(0)) revert HAV_IntentMissing();
+        if (msg.sender != st.maker && msg.sender != owner && msg.sender != executionRelay) revert HAV_Unauthorized();
+        if (dstChainId != st.dstChainId || dstReceiver != st.dstReceiver) revert HAV_BridgeMismatch();
+        emit BridgeHint(intentHash, dstChainId, dstReceiver, routeTag, block.timestamp);
+    }
+
+    // ---- insurance fund tap (only guardian paths) ----
+    function insurancePayout(address token, address to, uint256 amount, bytes32 reasonTag) external onlyGuardian nonReentrant {
+        if (token == address(0) || to == address(0)) revert HAV_BadConfig();
+        // minimal guard: tag must be nonzero to avoid ambiguous emissions
+        if (reasonTag == bytes32(0)) revert HAV_BadConfig();
+        IERC20(token).safeTransferFrom(insuranceFund, to, amount);
+        emit BridgeHint(reasonTag, uint64(block.chainid), bytes32(uint256(uint160(to))), reasonTag, block.timestamp);
+    }
+}
