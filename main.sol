@@ -278,3 +278,73 @@ contract HotelierAIV is ReentrancyGuard, Pausable {
     mapping(address => TokenInfo) public tokenInfo;
 
     // ---- custody ledger ----
+    mapping(address => mapping(address => uint256)) private _vault; // user => token => balance
+
+    // ---- intent book ----
+    struct Intent {
+        address maker;
+        address inputToken;
+        uint256 inputAmount;
+        address outputToken;
+        uint256 minOutputAmount;
+        uint64 dstChainId;
+        bytes32 dstReceiver; // bytes32 to allow non-EVM receivers
+        uint64 expiry;
+        uint64 nonce;
+        bytes32 strategyTag;
+        uint256 maxFeeBps;
+        uint64 createdAt;
+        uint64 cancelEarliest;
+    }
+
+    mapping(bytes32 => Intent) private _intents;
+    mapping(bytes32 => bool) public intentCancelled;
+    mapping(address => mapping(uint64 => bool)) public nonceUsed;
+    mapping(bytes32 => uint256) public filledInput; // intentHash => input amount consumed
+
+    // ---- protocol fee ----
+    uint256 public protocolFeeBps;
+
+    // ---- route registry (offchain-aware hints) ----
+    struct RouteProfile {
+        bytes32 routeTag;
+        uint64 dstChainId;
+        uint16 riskTier; // 0..65535
+        uint32 latencyHintSec;
+        uint48 updatedAt;
+        address curator;
+        bool enabled;
+    }
+
+    mapping(bytes32 => RouteProfile) public routeProfiles; // routeTag => profile
+    mapping(bytes32 => uint256) public routeScoreBps; // routeTag => scoring basis points (0..10000)
+
+    // ---- maker preferences ----
+    mapping(address => mapping(address => bool)) public preferredFiller; // maker => filler => allowed
+    mapping(address => uint256) public makerMinFillBps; // maker => minimum output ratio bps (0 disables)
+
+    // ---- risk ----
+    mapping(bytes32 => uint256) public riskCode; // 0 = ok
+    mapping(bytes32 => uint64) public riskAt;
+
+    // ---- EIP-712 helpers ----
+    function _domainSeparator() internal view returns (bytes32) {
+        return EIP712_DOMAIN_SEPARATOR;
+    }
+
+    function _hashDomain(string memory name_, string memory ver_) internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                DOMAIN_TYPEHASH,
+                keccak256(bytes(name_)),
+                keccak256(bytes(ver_)),
+                block.chainid,
+                address(this)
+            )
+        );
+    }
+
+    function _toTypedDataHash(bytes32 structHash) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+    }
+
