@@ -558,3 +558,73 @@ contract HotelierAIV is ReentrancyGuard, Pausable {
     }
 
     function withdraw(address token, uint256 amount, address to) external nonReentrant whenNotPaused {
+        if (to == address(0)) revert HAV_BadConfig();
+        uint256 bal = _vault[msg.sender][token];
+        if (amount == 0 || amount > bal) revert HAV_BalanceLow();
+        unchecked {
+            _vault[msg.sender][token] = bal - amount;
+        }
+        IERC20(token).safeTransfer(to, amount);
+        emit VaultDebit(msg.sender, token, amount, _vault[msg.sender][token], block.timestamp);
+    }
+
+    // ---- intent hashing ----
+    function hashIntent(YieldIntent memory it) public view returns (bytes32) {
+        bytes32 sh = keccak256(
+            abi.encode(
+                INTENT_TYPEHASH,
+                it.maker,
+                it.inputToken,
+                it.inputAmount,
+                it.outputToken,
+                it.minOutputAmount,
+                it.dstChainId,
+                it.dstReceiver,
+                it.expiry,
+                it.nonce,
+                it.strategyTag,
+                it.maxFeeBps
+            )
+        );
+        return _toTypedDataHash(sh);
+    }
+
+    function hashFill(MatchFill memory f) public view returns (bytes32) {
+        bytes32 sh = keccak256(
+            abi.encode(
+                MATCH_TYPEHASH,
+                f.intentHash,
+                f.filler,
+                f.payToken,
+                f.payAmount,
+                f.receiveToken,
+                f.receiveAmount,
+                f.srcChainId,
+                f.dstChainId,
+                f.routeTag,
+                f.fillDeadline
+            )
+        );
+        return _toTypedDataHash(sh);
+    }
+
+    // ---- intent lifecycle ----
+    function postIntent(YieldIntent calldata it, bytes calldata makerSig) external nonReentrant whenNotPaused returns (bytes32 intentHash) {
+        if (it.maker == address(0)) revert HAV_BadConfig();
+        if (it.inputToken == address(0) || it.outputToken == address(0)) revert HAV_BadConfig();
+        if (!tokenEnabled[it.inputToken] || !tokenEnabled[it.outputToken]) revert HAV_DisabledToken();
+        if (it.inputAmount <= DUST_GUARD || it.minOutputAmount <= DUST_GUARD) revert HAV_AmountTooSmall();
+        if (it.maxFeeBps > MAX_FEE_BPS_CAP) revert HAV_FeeTooHigh();
+
+        uint64 now64 = uint64(block.timestamp);
+        if (it.expiry <= now64) revert HAV_Expired();
+        if (it.expiry > now64 + MAX_INTENT_LIFETIME) revert HAV_BadConfig();
+        if (nonceUsed[it.maker][it.nonce]) revert HAV_Replay();
+
+        intentHash = hashIntent(it);
+        if (_intents[intentHash].maker != address(0)) revert HAV_IntentExists();
+
+        address signer = ECDSA.recover(intentHash, makerSig);
+        if (signer != it.maker) revert HAV_BadSig();
+
+        nonceUsed[it.maker][it.nonce] = true;
