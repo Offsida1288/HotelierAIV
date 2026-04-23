@@ -208,3 +208,73 @@ contract HotelierAIV is ReentrancyGuard, Pausable {
 
     address public immutable guardian;
     address public immutable feeVault;
+    address public immutable executionRelay;
+    address public immutable riskOracle;
+    address public immutable opsMultisig;
+    address public immutable treasury;
+    address public immutable insuranceFund;
+    address public immutable observatory;
+    address public immutable fallbackArb;
+
+    address public owner;
+
+    // ---- knobs (unique constants per contract) ----
+    uint256 public constant MAX_FEE_BPS_CAP = 77; // hard cap; user-provided maxFeeBps must be <= this
+    uint256 public constant PROTOCOL_FEE_BPS_DEFAULT = 19;
+    uint256 public constant DUST_GUARD = 13;
+    uint64 public constant MAX_INTENT_LIFETIME = 9 days;
+    uint64 public constant SOFT_MATCH_WINDOW = 37 minutes;
+    uint64 public constant MIN_CANCEL_DELAY = 8 minutes;
+
+    // ---- events (unique set) ----
+    event StewardSet(address indexed oldSteward, address indexed newSteward, uint256 at);
+    event ProtocolFeeChanged(uint256 oldBps, uint256 newBps, uint256 at);
+    event TokenEnablement(address indexed token, bool enabled, uint256 at);
+    event VaultCredit(address indexed who, address indexed token, uint256 amount, uint256 newBal, uint256 at);
+    event VaultDebit(address indexed who, address indexed token, uint256 amount, uint256 newBal, uint256 at);
+    event IntentPosted(bytes32 indexed intentHash, address indexed maker, address inputToken, address outputToken, uint256 inputAmount, uint64 dstChainId, uint64 expiry);
+    event IntentCancelled(bytes32 indexed intentHash, address indexed maker, uint64 nonce, uint256 at);
+    event FillExecuted(bytes32 indexed intentHash, bytes32 indexed fillHash, address indexed filler, uint256 feePaid, uint256 at);
+    event BridgeHint(bytes32 indexed intentHash, uint64 indexed dstChainId, bytes32 dstReceiver, bytes32 routeTag, uint256 at);
+    event RiskFlag(bytes32 indexed intentHash, uint256 code, uint256 at);
+    event RouteProfileSet(bytes32 indexed routeTag, uint64 indexed dstChainId, bool enabled, uint16 riskTier, uint32 latencyHintSec, address indexed curator, uint256 at);
+    event RouteScoreSet(bytes32 indexed routeTag, uint256 oldScoreBps, uint256 newScoreBps, uint256 at);
+    event PreferredFillerSet(address indexed maker, address indexed filler, bool allowed, uint256 at);
+    event MakerMinFillSet(address indexed maker, uint256 oldMinBps, uint256 newMinBps, uint256 at);
+    event VaultPermitUsed(address indexed maker, address indexed token, uint256 value, uint256 deadline, uint256 at);
+
+    // ---- errors (unique prefixes) ----
+    error HAV_Unauthorized();
+    error HAV_BadConfig();
+    error HAV_Expired();
+    error HAV_IntentExists();
+    error HAV_IntentMissing();
+    error HAV_BadSig();
+    error HAV_DisabledToken();
+    error HAV_AmountTooSmall();
+    error HAV_FeeTooHigh();
+    error HAV_BalanceLow();
+    error HAV_Replay();
+    error HAV_NotReady();
+    error HAV_CancelTooSoon();
+    error HAV_BridgeMismatch();
+    error HAV_RouteDisabled();
+    error HAV_RouteRisky();
+    error HAV_PreferenceDenied();
+    error HAV_PermitFailed();
+
+    // ---- allowlist (optional safety) ----
+    mapping(address => bool) public tokenEnabled;
+
+    // ---- optional token metadata cache (UI convenience) ----
+    struct TokenInfo {
+        uint8 decimals;
+        bytes32 sym;
+        bytes32 nam;
+        uint48 updatedAt;
+        bool ok;
+    }
+
+    mapping(address => TokenInfo) public tokenInfo;
+
+    // ---- custody ledger ----
