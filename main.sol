@@ -698,3 +698,73 @@ contract HotelierAIV is ReentrancyGuard, Pausable {
         riskAt[intentHash] = uint64(block.timestamp);
         emit RiskFlag(intentHash, code, block.timestamp);
     }
+
+    // ---- matching / settlement ----
+    function previewFee(uint256 grossInput, uint256 maxFeeBps) public view returns (uint256 fee, uint256 net) {
+        uint256 bps = protocolFeeBps;
+        if (bps > maxFeeBps) bps = maxFeeBps;
+        fee = grossInput.mulWad((bps * 1e14)); // bps / 1e4
+        if (fee > grossInput) fee = grossInput;
+        net = grossInput - fee;
+    }
+
+    function _available(bytes32 intentHash) internal view returns (uint256) {
+        Intent memory st = _intents[intentHash];
+        if (st.maker == address(0)) return 0;
+        uint256 used = filledInput[intentHash];
+        if (used >= st.inputAmount) return 0;
+        return st.inputAmount - used;
+    }
+
+    function fillIntent(
+        YieldIntent calldata it,
+        bytes calldata makerSig,
+        MatchFill calldata f,
+        bytes calldata fillerSig
+    ) external nonReentrant whenNotPaused returns (bytes32 intentHash, bytes32 fillHash) {
+        intentHash = hashIntent(it);
+
+        // intent presence / consistency
+        Intent memory st = _intents[intentHash];
+        if (st.maker == address(0)) revert HAV_IntentMissing();
+        if (intentCancelled[intentHash]) revert HAV_IntentMissing();
+        if (riskCode[intentHash] != 0) revert HAV_NotReady();
+        if (uint64(block.timestamp) > st.expiry) revert HAV_Expired();
+
+        // validate that the supplied intent fields match stored
+        if (
+            st.maker != it.maker ||
+            st.inputToken != it.inputToken ||
+            st.outputToken != it.outputToken ||
+            st.inputAmount != it.inputAmount ||
+            st.minOutputAmount != it.minOutputAmount ||
+            st.dstChainId != it.dstChainId ||
+            st.dstReceiver != it.dstReceiver ||
+            st.nonce != it.nonce ||
+            st.strategyTag != it.strategyTag ||
+            st.maxFeeBps != it.maxFeeBps
+        ) revert HAV_BadConfig();
+
+        // signatures
+        address mk = ECDSA.recover(intentHash, makerSig);
+        if (mk != st.maker) revert HAV_BadSig();
+
+        // fill struct checks
+        if (f.intentHash != intentHash) revert HAV_BadConfig();
+        if (f.fillDeadline < uint64(block.timestamp)) revert HAV_Expired();
+        if (f.dstChainId != st.dstChainId) revert HAV_BridgeMismatch();
+        if (f.srcChainId != uint64(block.chainid)) revert HAV_BadConfig();
+        if (f.payToken != st.outputToken) revert HAV_BadConfig();
+        if (f.receiveToken != st.inputToken) revert HAV_BadConfig();
+        if (f.filler == address(0)) revert HAV_BadConfig();
+
+        // filler signature binds the fill (optional: allow msg.sender without sig)
+        fillHash = hashFill(f);
+        address fl = ECDSA.recover(fillHash, fillerSig);
+        if (fl != f.filler) revert HAV_BadSig();
+
+        // route policy (optional)
+        RouteProfile memory rp = routeProfiles[f.routeTag];
+        if (rp.routeTag != bytes32(0)) {
+            if (!rp.enabled) revert HAV_RouteDisabled();
+            if (rp.dstChainId != st.dstChainId) revert HAV_BridgeMismatch();
