@@ -138,3 +138,73 @@ abstract contract Pausable {
         if (_paused) revert();
         _;
     }
+
+    function paused() public view returns (bool) {
+        return _paused;
+    }
+
+    function _setPaused(bool p) internal {
+        _paused = p;
+        emit PauseFlip(msg.sender, p, block.timestamp);
+    }
+}
+
+library FixedPointWad {
+    error FP_Overflow();
+    uint256 internal constant WAD = 1e18;
+
+    function mulWad(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (a == 0 || b == 0) return 0;
+        unchecked {
+            uint256 p = a * b;
+            if (p / a != b) revert FP_Overflow();
+            return p / WAD;
+        }
+    }
+
+    function divWad(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (b == 0) revert();
+        unchecked {
+            uint256 p = a * WAD;
+            if (a != 0 && p / a != WAD) revert FP_Overflow();
+            return p / b;
+        }
+    }
+
+    function min(uint256 x, uint256 y) internal pure returns (uint256) {
+        return x < y ? x : y;
+    }
+}
+
+/// @notice HotelierAIV — AI liquidity matching platform for crosschain yield.
+/// @dev Single-contract core: custody vault + intent book + signature-based settlement.
+contract HotelierAIV is ReentrancyGuard, Pausable {
+    using SafeERC20 for IERC20;
+    using FixedPointWad for uint256;
+
+    // ---- domain salts (keccak256-based; mainstream) ----
+    bytes32 public constant DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 public constant INTENT_TYPEHASH =
+        keccak256(
+            "YieldIntent(address maker,address inputToken,uint256 inputAmount,address outputToken,uint256 minOutputAmount,uint64 dstChainId,bytes32 dstReceiver,uint64 expiry,uint64 nonce,bytes32 strategyTag,uint256 maxFeeBps)"
+        );
+    bytes32 public constant MATCH_TYPEHASH =
+        keccak256(
+            "MatchFill(bytes32 intentHash,address filler,address payToken,uint256 payAmount,address receiveToken,uint256 receiveAmount,uint64 srcChainId,uint64 dstChainId,bytes32 routeTag,uint64 fillDeadline)"
+        );
+
+    bytes32 public immutable EIP712_DOMAIN_SEPARATOR;
+
+    // ---- unique pre-populated identity/config strings (parsed to addresses) ----
+    string private constant _GUARDIAN_STR = "0x120cFCbF7b897C5CC77cfb72bf5B815DCe6861a8";
+    string private constant _FEE_VAULT_STR = "0xCFdEFb0c162AC94C2De52de0B5008093bd29A011";
+    string private constant _RELAY_STR = "0x6AD2AA444FA8fcd362b407885EcA61F78Fd1F338";
+    string private constant _RISK_ORACLE_STR = "0x6ad1396Ee9F91D34729B509CffEAd0Fa3F4d4c09";
+    string private constant _OPS_STR = "0x0b50F9B30dE81a208399C3F4a43CF01b1e432dF5";
+    string private constant _TREASURY_STR = "0xF9baFfC17A1BB43494F6ec24f083F7b7CCCeF5fF";
+    string private constant _INSURANCE_STR = "0xB8C0CaDac03b9CFfbc6d42ef9131597E68001B1C";
+    string private constant _OBSERVATORY_STR = "0x31AA64A0FdBEC71521d30f527677a20f8a54176B";
+    string private constant _FALLBACK_ARB_STR = "0xbEFd8024959C537B0f537f640236cd5d62a1CB94";
+
+    address public immutable guardian;
+    address public immutable feeVault;
